@@ -3,7 +3,6 @@ import os
 import sys
 import types
 from datetime import datetime
-from urllib.parse import urlparse
 
 import requests
 from django.apps import AppConfig
@@ -16,7 +15,6 @@ from django.views.decorators.http import require_GET
 from pyodide_http import patch_all
 
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-DEFAULT_STAC_API = "https://earth-search.aws.element84.com/v1"
 
 
 class BaseAppConfig(AppConfig):
@@ -58,25 +56,8 @@ def _configure_django() -> None:
     )
 
 
-def _bootstrap_runtime() -> None:
-    patch_all()
-    _mock_base_app()
-    _configure_django()
-
-    import django
-    from django.apps import apps
-
-    if not apps.ready:
-        django.setup()
-
-
-_bootstrap_runtime()
-
-
 class StacItem(models.Model):
     stac_id = models.CharField(max_length=255, unique=True)
-    collection = models.CharField(max_length=255, default="")
-    api_url = models.CharField(max_length=1024, default=DEFAULT_STAC_API)
     geometry = models.TextField()
     datetime = models.DateTimeField(null=True, blank=True)
     assets = models.TextField(default="{}")
@@ -104,14 +85,6 @@ def _parse_datetime(raw_value: str | None):
         return None
 
 
-def _normalize_api_url(raw_value: str | None) -> str:
-    candidate = (raw_value or DEFAULT_STAC_API).strip().rstrip("/")
-    parsed = urlparse(candidate)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("api_url must be a valid http(s) URL")
-    return candidate
-
-
 def _extract_streamable_assets(raw_assets: dict | None) -> dict:
     if not isinstance(raw_assets, dict):
         return {}
@@ -122,8 +95,8 @@ def _extract_streamable_assets(raw_assets: dict | None) -> dict:
             continue
 
         href = asset.get("href")
-        media_type = (asset.get("type") or "").lower()
-        role_blob = " ".join(asset.get("roles", [])).lower()
+        media_type = asset.get("type") or ""
+        role_blob = " ".join(asset.get("roles", []))
         is_image = "image" in media_type or "visual" in role_blob or "thumbnail" in role_blob
         if href and is_image:
             kept_assets[key] = {
@@ -143,8 +116,6 @@ def _to_geojson_feature(item: StacItem) -> dict:
         "geometry": json.loads(item.geometry),
         "properties": {
             "stac_id": item.stac_id,
-            "collection": item.collection,
-            "api_url": item.api_url,
             "datetime": item.datetime.isoformat() if item.datetime else None,
             "streamable_assets": json.loads(item.assets),
         },
@@ -152,45 +123,9 @@ def _to_geojson_feature(item: StacItem) -> dict:
 
 
 @require_GET
-def stac_collections(request):
-    try:
-        api_url = _normalize_api_url(request.GET.get("api_url"))
-    except ValueError as exc:
-        return JsonResponse({"error": str(exc)}, status=400)
-
-    try:
-        response = requests.get(f"{api_url}/collections", timeout=20)
-        response.raise_for_status()
-        payload = response.json()
-    except Exception as exc:
-        return JsonResponse({"error": f"Failed to fetch collections: {exc}"}, status=502)
-
-    collections = []
-    for collection in payload.get("collections", []):
-        collections.append(
-            {
-                "id": collection.get("id"),
-                "title": collection.get("title") or collection.get("id"),
-                "description": collection.get("description", ""),
-            }
-        )
-
-    return JsonResponse({"api_url": api_url, "collections": collections})
-
-
-@require_GET
 def stac_search(request):
     bbox_param = request.GET.get("bbox", "")
     limit_param = request.GET.get("limit", "10")
-    collection = (request.GET.get("collection", "sentinel-2-l2a") or "").strip()
-
-    if not collection:
-        return JsonResponse({"error": "collection is required"}, status=400)
-
-    try:
-        api_url = _normalize_api_url(request.GET.get("api_url"))
-    except ValueError as exc:
-        return JsonResponse({"error": str(exc)}, status=400)
 
     try:
         bbox = [float(value) for value in bbox_param.split(",")]
@@ -205,14 +140,14 @@ def stac_search(request):
         return JsonResponse({"error": "Invalid limit. Must be an integer."}, status=400)
 
     payload = {
-        "collections": [collection],
+        "collections": ["sentinel-2-l2a"],
         "bbox": bbox,
         "limit": limit,
     }
 
     try:
         response = requests.post(
-            f"{api_url}/search",
+            "https://earth-search.aws.element84.com/v1/search",
             json=payload,
             timeout=20,
         )
@@ -234,8 +169,6 @@ def stac_search(request):
         item, _ = StacItem.objects.update_or_create(
             stac_id=stac_id,
             defaults={
-                "collection": collection,
-                "api_url": api_url,
                 "geometry": json.dumps(geometry),
                 "datetime": dt,
                 "assets": json.dumps(streamable_assets),
@@ -257,7 +190,6 @@ def health(_request):
 
 
 urlpatterns = [
-    path("api/stac/collections/", stac_collections),
     path("api/stac/search/", stac_search),
     path("api/stac/clear/", stac_clear),
     path("health/", health),
@@ -270,4 +202,15 @@ def handle_request(path_with_query: str) -> str:
     return response.content.decode("utf-8")
 
 
-_ensure_schema()
+def bootstrap() -> None:
+    patch_all()
+    _mock_base_app()
+    _configure_django()
+
+    import django
+
+    django.setup()
+    _ensure_schema()
+
+
+bootstrap()

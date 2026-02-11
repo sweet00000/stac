@@ -15,30 +15,19 @@
       body {
         height: 100%;
         margin: 0;
-        font-family: sans-serif;
-      }
-      #toolbar {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        padding: 8px;
-        flex-wrap: wrap;
-        border-bottom: 1px solid #d8dee4;
-        background: #f4f6f8;
-      }
-      #toolbar input,
-      #toolbar select,
-      #toolbar button {
-        font-size: 13px;
-        padding: 4px 6px;
-      }
-      #status {
-        font-size: 13px;
-        color: #1f2937;
       }
       #map {
-        height: calc(100% - 62px);
+        height: calc(100% - 44px);
         width: 100%;
+      }
+      #status {
+        height: 44px;
+        padding: 10px;
+        box-sizing: border-box;
+        font-family: sans-serif;
+        font-size: 14px;
+        background: #f4f6f8;
+        border-bottom: 1px solid #d8dee4;
       }
       .asset-links {
         margin-top: 6px;
@@ -49,34 +38,7 @@
     </style>
   </head>
   <body>
-    <div id="toolbar">
-      <label>
-        Catalog
-        <select id="catalogPreset">
-          <option value="https://earth-search.aws.element84.com/v1">Earth Search AWS</option>
-          <option value="https://planetarycomputer.microsoft.com/api/stac/v1">Planetary Computer</option>
-        </select>
-      </label>
-      <label>
-        API URL
-        <input id="apiUrl" size="45" value="https://earth-search.aws.element84.com/v1" />
-      </label>
-      <button id="loadCollections">Load Collections</button>
-      <label>
-        Filter
-        <input id="collectionFilter" placeholder="filter collection id/title" />
-      </label>
-      <label>
-        Collection
-        <select id="collectionSelect"></select>
-      </label>
-      <label>
-        Limit
-        <input id="limitInput" type="number" min="1" max="100" value="10" style="width: 60px" />
-      </label>
-      <button id="clearCache">Clear Cache</button>
-      <span id="status">Booting Pyodide…</span>
-    </div>
+    <div id="status">Booting Pyodide…</div>
     <div id="map"></div>
 
     <script
@@ -88,16 +50,7 @@
 
     <script>
       const statusEl = document.getElementById('status');
-      const catalogPresetEl = document.getElementById('catalogPreset');
-      const apiUrlEl = document.getElementById('apiUrl');
-      const loadCollectionsEl = document.getElementById('loadCollections');
-      const collectionFilterEl = document.getElementById('collectionFilter');
-      const collectionSelectEl = document.getElementById('collectionSelect');
-      const limitInputEl = document.getElementById('limitInput');
-      const clearCacheEl = document.getElementById('clearCache');
-
       const map = L.map('map').setView([37.7749, -122.4194], 10);
-      const allCollections = [];
 
       const footprintsLayer = L.geoJSON([], {
         style: {
@@ -113,7 +66,6 @@
 
           layer.bindPopup(`
             <strong>${props.stac_id ?? 'Unknown ID'}</strong><br>
-            ${props.collection ?? 'Unknown collection'}<br>
             ${props.datetime ?? 'No timestamp'}
             <div class="asset-links">${links || '<em>No image assets</em>'}</div>
           `);
@@ -143,40 +95,6 @@
         };
       }
 
-      function applyCollectionFilter() {
-        const filter = collectionFilterEl.value.trim().toLowerCase();
-        const filtered = allCollections.filter((item) => {
-          return !filter || item.id.toLowerCase().includes(filter) || (item.title || '').toLowerCase().includes(filter);
-        });
-
-        collectionSelectEl.innerHTML = '';
-        for (const item of filtered) {
-          const option = document.createElement('option');
-          option.value = item.id;
-          option.textContent = item.title ? `${item.id} — ${item.title}` : item.id;
-          collectionSelectEl.appendChild(option);
-        }
-      }
-
-      async function runBackend(pyodide, queryPath) {
-        const pyExpr = `import backend\nbackend.handle_request(${JSON.stringify(queryPath)})`;
-        const raw = await pyodide.runPythonAsync(pyExpr);
-        return JSON.parse(raw);
-      }
-
-      async function loadCollections(pyodide) {
-        const apiUrl = apiUrlEl.value.trim();
-        setStatus('Loading STAC collections...');
-        const data = await runBackend(pyodide, `/api/stac/collections/?api_url=${encodeURIComponent(apiUrl)}`);
-        if (data.error) {
-          throw new Error(data.error);
-        }
-
-        allCollections.splice(0, allCollections.length, ...(data.collections || []));
-        applyCollectionFilter();
-        setStatus(`Loaded ${allCollections.length} collections.`);
-      }
-
       async function initPyodideBridge() {
         setStatus('Loading Pyodide…');
         const pyodide = await loadPyodide();
@@ -197,25 +115,20 @@
         pyodide.FS.writeFile('backend.py', backendSource);
         await pyodide.runPythonAsync('import backend');
 
+        setStatus('Ready. Move the map to query STAC footprints.');
         return pyodide;
       }
 
       function installMapSearch(pyodide) {
         const runSearch = debounce(async () => {
-          const collection = collectionSelectEl.value;
-          if (!collection) {
-            setStatus('Select a collection first.');
-            return;
-          }
-
           const bbox = getBboxString(map.getBounds());
-          const apiUrl = apiUrlEl.value.trim();
-          const limit = Math.min(100, Math.max(1, Number(limitInputEl.value || 10)));
-          setStatus(`Searching ${collection}...`);
+          setStatus('Searching STAC…');
 
           try {
-            const query = `/api/stac/search/?bbox=${encodeURIComponent(bbox)}&limit=${limit}&collection=${encodeURIComponent(collection)}&api_url=${encodeURIComponent(apiUrl)}`;
-            const data = await runBackend(pyodide, query);
+            const query = `/api/stac/search/?bbox=${bbox}&limit=10`;
+            const pyExpr = `import backend\nbackend.handle_request(${JSON.stringify(query)})`;
+            const raw = await pyodide.runPythonAsync(pyExpr);
+            const data = JSON.parse(raw);
 
             if (data.error) {
               throw new Error(data.error);
@@ -223,7 +136,7 @@
 
             footprintsLayer.clearLayers();
             footprintsLayer.addData(data);
-            setStatus(`Loaded ${data.features?.length ?? 0} footprints for ${collection}.`);
+            setStatus(`Loaded ${data.features?.length ?? 0} footprints.`);
           } catch (error) {
             console.error(error);
             setStatus(`Search failed: ${error.message || error}`);
@@ -231,46 +144,13 @@
         }, 500);
 
         map.on('moveend', runSearch);
-        collectionSelectEl.addEventListener('change', runSearch);
-        limitInputEl.addEventListener('change', runSearch);
-        apiUrlEl.addEventListener('change', runSearch);
-
-        return { runSearch };
+        runSearch();
       }
 
       (async () => {
         try {
           const pyodide = await initPyodideBridge();
-          const { runSearch } = installMapSearch(pyodide);
-
-          catalogPresetEl.addEventListener('change', () => {
-            apiUrlEl.value = catalogPresetEl.value;
-          });
-
-          loadCollectionsEl.addEventListener('click', async () => {
-            try {
-              await loadCollections(pyodide);
-              runSearch();
-            } catch (error) {
-              console.error(error);
-              setStatus(`Collections failed: ${error.message || error}`);
-            }
-          });
-
-          collectionFilterEl.addEventListener('input', applyCollectionFilter);
-
-          clearCacheEl.addEventListener('click', async () => {
-            try {
-              const data = await runBackend(pyodide, '/api/stac/clear/');
-              setStatus(`Cache cleared (${data.deleted ?? 0} rows).`);
-              footprintsLayer.clearLayers();
-            } catch (error) {
-              setStatus(`Clear failed: ${error.message || error}`);
-            }
-          });
-
-          await loadCollections(pyodide);
-          runSearch();
+          installMapSearch(pyodide);
         } catch (error) {
           console.error(error);
           setStatus(`Bootstrap failed: ${error.message || error}`);
